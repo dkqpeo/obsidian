@@ -8,11 +8,11 @@ LLM 기반 학습 문제 자동 생성 시스템의 LangGraph 워크플로우
 
 ```mermaid
 graph TD
-    Start([START]) --> Analyze[analyze_content_node<br/>학습 내용 분석]
-    Analyze --> Build[build_context_node<br/>컨텍스트 구성]
-    Build --> Generate[generate_problems_node<br/>문제 생성]
-    Generate --> Validate[validate_problems_node<br/>문제 검증]
-    Validate --> Decision{should_regenerate<br/>재생성 판단}
+    Start([START]) --> Analyze[analyze_content_node<br/>학습 내용 분석<br/><b>⏱️ 2~3초</b>]
+    Analyze --> Build[build_context_node<br/>컨텍스트 구성<br/><b>⏱️ ~0.01초</b>]
+    Build --> Generate[generate_problems_node<br/>문제 생성<br/><b>⏱️ 3~5초</b>]
+    Generate --> Validate[validate_problems_node<br/>문제 검증<br/><b>⏱️ ~0.01초</b>]
+    Validate --> Decision{should_regenerate<br/>재생성 판단<br/><b>⏱️ ~0.01초</b>}
 
     Decision -->|충분한 문제<br/>또는<br/>최대 재시도| End([END])
     Decision -->|문제 부족<br/>retry < 5| Generate
@@ -23,6 +23,18 @@ graph TD
     style Validate fill:#e5f5e5
     style Decision fill:#ffe5f5
 ```
+
+### 성능 지표
+
+| 단계 | 평균 시간 | 주요 작업 | 비고 |
+|------|---------|----------|------|
+| **Analyze** | 2~3초 | LLM 토픽 추출 + ChromaDB 검색 | 토픽 제공시 ~0.2초 |
+| **Build** | ~0.01초 | 라운드 로빈 컨텍스트 구성 | 빠른 텍스트 처리 |
+| **Generate** | 3~5초 | Solar LLM 문제 생성 | 난이도/개수 영향 |
+| **Validate** | ~0.01초 | 검증 로직 실행 | 빠른 규칙 검사 |
+| **Decision** | ~0.01초 | 재생성 판단 | 조건 체크만 |
+| **Total (1회)** | **5~8초** | 재시도 없이 성공 | |
+| **Total (재시도)** | **10~25초** | 최대 5회 재시도 포함 | retry_count 영향 |
 
 ---
 
@@ -58,25 +70,31 @@ classDiagram
 
 ---
 
-## 노드 1: analyze_content_node
+## 노드 1: analyze_content_node (⏱️ 2~3초)
 
 ### 학습 내용 분석
 
 ```mermaid
 flowchart TD
     A[입력] --> B{learning_topics<br/>있음?}
-    B -->|No| C[TopicExtractor<br/>LLM 키워드 추출]
-    B -->|Yes| D[키워드 사용]
+    B -->|No| C[TopicExtractor<br/>LLM 키워드 추출<br/><i>~2초</i>]
+    B -->|Yes| D[키워드 사용<br/><i>~0초</i>]
     C --> D
-    D --> E[ContentAnalyzer<br/>ChromaDB 검색]
-    E --> F[난이도별<br/>검색 전략 적용]
-    F --> G[토픽별<br/>문서 그룹화]
+    D --> E[ContentAnalyzer<br/>ChromaDB 검색<br/><i>~0.2초/토픽</i>]
+    E --> F[난이도별<br/>검색 전략 적용<br/><i>~0.1초</i>]
+    F --> G[토픽별<br/>문서 그룹화<br/><i>~0.1초</i>]
     G --> H[learning_content<br/>반환]
 
     style C fill:#ffe5e5
     style E fill:#e5f5e5
     style G fill:#fff4e1
 ```
+
+**세부 처리 단계**:
+1. **토픽 추출** (~2초 or ~0초): LLM으로 키워드 추출 (이미 제공되면 스킵)
+2. **ChromaDB 검색** (~0.2초/토픽): 각 토픽별로 관련 문서 검색
+3. **난이도별 전략 적용** (~0.1초): BEGINNER 5개, INTERMEDIATE 7개, ADVANCED 10개
+4. **문서 그룹화** (~0.1초): 토픽별로 검색 결과 정리
 
 ### 주제 추출 과정
 
@@ -200,25 +218,25 @@ graph LR
 
 ---
 
-## 노드 3: generate_problems_node
+## 노드 3: generate_problems_node (⏱️ 3~5초)
 
 ### 난이도별 생성기 선택
 
 ```mermaid
 flowchart TD
-    A[context + difficulty] --> B{난이도}
+    A[context + difficulty] --> B{난이도<br/><i>~0초</i>}
     B -->|BEGINNER| C[BeginnerGenerator]
     B -->|INTERMEDIATE| D[IntermediateGenerator]
     B -->|ADVANCED| E[AdvancedGenerator]
 
-    C --> F[Solar LLM<br/>temperature=0.7]
+    C --> F[Solar LLM<br/>temperature=0.7<br/><i>~3~5초</i>]
     D --> F
     E --> F
 
-    F --> G[JSON 파싱]
+    F --> G[JSON 파싱<br/><i>~0.01초</i>]
     G --> H{파싱 성공?}
-    H -->|No| I[clean_and_parse_json<br/>에러 복구]
-    H -->|Yes| J[Problem 모델 변환]
+    H -->|No| I[clean_and_parse_json<br/>에러 복구<br/><i>~0.01초</i>]
+    H -->|Yes| J[Problem 모델 변환<br/><i>~0.01초</i>]
     I --> J
     J --> K[generated_problems]
 
@@ -228,6 +246,13 @@ flowchart TD
     style F fill:#ffe5e5
     style I fill:#ffe5f5
 ```
+
+**세부 처리 단계**:
+1. **Generator 선택** (~0초): 난이도에 따른 조건 분기
+2. **프롬프트 구성** (~0.01초): 컨텍스트 + 난이도별 프롬프트 템플릿
+3. **LLM 생성** (~3-5초): Solar-1-mini-chat으로 JSON 형태 문제 생성
+4. **JSON 파싱** (~0.01초): 응답을 Python 딕셔너리로 변환 (에러 복구 포함)
+5. **모델 변환** (~0.01초): Problem 모델 객체로 변환
 
 ### 난이도별 문제 유형
 

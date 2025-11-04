@@ -8,13 +8,25 @@ RAG 기반 질의응답 시스템의 LangGraph 워크플로우
 
 ```mermaid
 graph TD
-    Start([START]) --> Parse[parse_document_node<br/>문서 파싱]
-    Parse --> EmbedStore[embed_and_store_node<br/>임베딩 및 저장]
+    Start([START]) --> Parse[parse_document_node<br/>문서 파싱<br/><b>⏱️ PDF 5~300초</b>]
+    Parse --> EmbedStore[embed_and_store_node<br/>임베딩 및 저장<br/><b>⏱️ 청크당 ~0.1초</b>]
     EmbedStore --> End([END])
 
     style Parse fill:#e1f5ff
     style EmbedStore fill:#fff4e1
 ```
+
+### 성능 지표
+
+| 단계 | 소요 시간 | 주요 작업 | 예시 (554페이지 PDF) |
+|------|---------|----------|---------------------|
+| **Parse** | 5~300초 | Upstage Document Parse API | ~300초 |
+| **Embed & Store** | 청크당 ~0.1초 | 임베딩 생성 + ChromaDB 저장 | 2,700청크 × 0.1초 = ~270초 |
+| **Total** | **문서 크기 의존** | 파싱 + 임베딩 + 저장 | **~570초 (9.5분)** |
+
+**최적화 포인트**:
+- 배치 임베딩으로 API 호출 최소화 (텍스트 배열 한 번에 전송)
+- ChromaDB 배치 저장 (BATCH_SIZE=100)으로 HTTP 요청 27회로 감소
 
 ### State: UploadState
 
@@ -45,15 +57,15 @@ flowchart LR
     style D fill:#e5f5ff
 ```
 
-### embed_and_store_node
+### embed_and_store_node (⏱️ 청크당 ~0.1초)
 
 ```mermaid
 flowchart TD
-    A[parsed_blocks] --> B[RecursiveCharacterTextSplitter<br/>청킹]
-    B --> C[청크 생성<br/>chunk_size=500<br/>overlap=50]
-    C --> D[Upstage Embedding API<br/>배치 임베딩]
-    D --> E{배치 처리<br/>BATCH_SIZE=100}
-    E --> F[ChromaDB 저장<br/>배치 1/27]
+    A[parsed_blocks] --> B[RecursiveCharacterTextSplitter<br/>청킹<br/><i>~1초</i>]
+    B --> C[청크 생성<br/>chunk_size=500<br/>overlap=50<br/><i>~2초</i>]
+    C --> D[Upstage Embedding API<br/>배치 임베딩<br/><i>~240초</i>]
+    D --> E{배치 처리<br/>BATCH_SIZE=100<br/><i>~27초</i>}
+    E --> F[ChromaDB 저장<br/>배치 1/27<br/><i>~1초/배치</i>]
     F --> G{더 저장할<br/>배치?}
     G -->|Yes| F
     G -->|No| H[저장 완료<br/>embeddings 반환]
@@ -62,6 +74,12 @@ flowchart TD
     style D fill:#ffe5e5
     style E fill:#e5f5e5
 ```
+
+**세부 처리 단계** (554페이지 PDF 기준):
+1. **텍스트 분할** (~3초): 554개 블록을 2,700개 청크로 분할
+2. **임베딩 생성** (~240초): Upstage API로 2,700개 청크 → 4096차원 벡터 변환
+3. **배치 저장** (~27초): ChromaDB에 100개씩 27회 저장 (페이로드 제한 회피)
+4. **Total**: **~270초 (4.5분)**
 
 #### 청킹 상세
 
@@ -110,13 +128,21 @@ sequenceDiagram
 
 ```mermaid
 graph TD
-    Start([START]) --> Retrieve[retrieve_node<br/>문서 검색]
-    Retrieve --> Generate[generate_answer_node<br/>답변 생성]
+    Start([START]) --> Retrieve[retrieve_node<br/>문서 검색<br/><b>⏱️ 0.2~0.3초</b>]
+    Retrieve --> Generate[generate_answer_node<br/>답변 생성<br/><b>⏱️ 0.8~1.0초</b>]
     Generate --> End([END])
 
     style Retrieve fill:#e1f5ff
     style Generate fill:#fff4e1
 ```
+
+### 성능 지표
+
+| 단계 | 평균 시간 | 주요 작업 |
+|------|---------|----------|
+| **Retrieve** | 0.2~0.3초 | 질문 임베딩 + ChromaDB 검색 (k=3) |
+| **Generate** | 0.8~1.0초 | 컨텍스트 구성 + Solar LLM 응답 생성 |
+| **Total** | **1.0~1.3초** | 전체 QA 응답 시간 |
 
 ### State: QAState
 
@@ -132,19 +158,25 @@ classDiagram
     }
 ```
 
-### retrieve_node
+### retrieve_node (⏱️ 0.2~0.3초)
 
 ```mermaid
 flowchart TD
-    A[질문 입력] --> B[Upstage Embedding API<br/>질문 임베딩]
-    B --> C[ChromaDB 검색<br/>n_results=3<br/>filter: material_id]
-    C --> D[유사도 계산<br/>Cosine Distance]
-    D --> E[상위 3개 청크<br/>retrieved_docs]
+    A[질문 입력] --> B[Upstage Embedding API<br/>질문 임베딩<br/><i>~0.1초</i>]
+    B --> C[ChromaDB 검색<br/>n_results=3<br/>filter: material_id<br/><i>~0.1초</i>]
+    C --> D[유사도 계산<br/>Cosine Distance<br/><i>~0.01초</i>]
+    D --> E[상위 3개 청크<br/>retrieved_docs<br/><i>~0.01초</i>]
 
     style B fill:#ffe5e5
     style C fill:#e5f5e5
     style D fill:#fff4e1
 ```
+
+**세부 처리 단계**:
+1. **질문 임베딩 생성** (~0.1초): Upstage API를 통해 4096차원 벡터 생성
+2. **벡터 유사도 검색** (~0.1초): ChromaDB에서 코사인 거리 기반 검색
+3. **결과 필터링** (~0.01초): material_id로 필터링, 상위 3개 선택
+4. **응답 구성** (~0.01초): 문서 내용, 페이지, 메타데이터 포맷팅
 
 #### 검색 과정
 
@@ -163,20 +195,26 @@ sequenceDiagram
     Note over R: 청크1: distance=0.12<br/>청크2: distance=0.18<br/>청크3: distance=0.24
 ```
 
-### generate_answer_node
+### generate_answer_node (⏱️ 0.8~1.0초)
 
 ```mermaid
 flowchart TD
-    A[retrieved_docs] --> B[컨텍스트 구성<br/>페이지 번호 포함]
-    B --> C[프롬프트 생성<br/>학습자료 + 질문]
-    C --> D[Upstage Solar LLM<br/>solar-1-mini-chat<br/>temperature=0.3]
-    D --> E[답변 생성]
-    E --> F[출처 정보 구성<br/>excerpt 100자]
+    A[retrieved_docs] --> B[컨텍스트 구성<br/>페이지 번호 포함<br/><i>~0.01초</i>]
+    B --> C[프롬프트 생성<br/>학습자료 + 질문<br/><i>~0.01초</i>]
+    C --> D[Upstage Solar LLM<br/>solar-1-mini-chat<br/>temperature=0.3<br/><i>~0.8초</i>]
+    D --> E[답변 생성<br/><i>~0.01초</i>]
+    E --> F[출처 정보 구성<br/>excerpt 100자<br/><i>~0.01초</i>]
     F --> G[answer + sources<br/>반환]
 
     style D fill:#ffe5e5
     style F fill:#fff4e1
 ```
+
+**세부 처리 단계**:
+1. **컨텍스트 구성** (~0.01초): 검색된 3개 청크를 페이지 번호와 함께 포맷팅
+2. **프롬프트 빌드** (~0.01초): 시스템 프롬프트 + 컨텍스트 + 질문 결합
+3. **LLM 응답 생성** (~0.8초): Solar-1-mini-chat 모델로 답변 생성 (가장 긴 단계)
+4. **후처리** (~0.02초): 답변 텍스트 추출 및 출처 정보 구성
 
 #### 답변 생성 과정
 
